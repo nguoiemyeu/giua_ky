@@ -1,0 +1,222 @@
+import cv2
+import mediapipe as mp
+from PIL import Image, ImageDraw, ImageFont
+import numpy as np
+import math
+
+# ----------------- HÀM HỖ TRỢ -----------------
+
+def euclidean_distance(p1, p2):
+    """Tính khoảng cách Euclid giữa hai điểm p1 và p2."""
+    return math.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2)
+
+def classify_face_shape_from_landmarks(landmarks):
+    """
+    Sử dụng một số điểm landmarks (đã chuyển sang tọa độ pixel) để phân loại hình dạng khuôn mặt.
+    Các điểm sử dụng:
+      - landmark 10: gần đỉnh trán
+      - landmark 152: đầu cằm
+      - landmark 234 và 454: hai bên của khuôn mặt (xác định chiều rộng)
+      - landmark 70 và 300: ước tính độ rộng vùng trán
+    Trả về:
+      - face_shape: mô tả bằng tiếng Việt (vd: "Khuôn mặt dài")
+      - face_type: chuỗi (long, oval, round, square, triangle) dùng để chọn trang sức
+      - length_width_ratio: tỉ lệ chiều dài/chều rộng (để debug)
+      - jaw_forehead_ratio: tỉ lệ giữa độ rộng hàm (ước tính bằng face_width) và độ rộng trán
+    """
+    try:
+        p10 = landmarks[10]
+        p152 = landmarks[152]
+        p234 = landmarks[234]
+        p454 = landmarks[454]
+        p70 = landmarks[70]
+        p300 = landmarks[300]
+    except IndexError:
+        # Nếu không có đủ điểm, trả về mặc định
+        return "Khuôn mặt không xác định", "oval", 1.0, 1.0
+
+    face_length = euclidean_distance(p10, p152)
+    face_width = euclidean_distance(p234, p454)
+    forehead_width = euclidean_distance(p70, p300)
+    # Ước tính jaw_width bằng face_width (vì các landmark 234 và 454 đại diện cho hai bên hàm)
+    jaw_width = face_width
+
+    length_width_ratio = face_length / face_width if face_width != 0 else 1.0
+    jaw_forehead_ratio = jaw_width / forehead_width if forehead_width != 0 else 1.0
+
+    # Phân loại dựa trên các tỉ lệ (ngưỡng này có thể điều chỉnh)
+    if length_width_ratio > 1.5:
+        face_shape = "Khuôn mặt dài"
+        face_type = "long"
+    elif 1.2 <= length_width_ratio <= 1.5:
+        face_shape = "Khuôn mặt trái xoan"
+        face_type = "oval"
+    elif abs(length_width_ratio - 1.0) < 0.2:
+        # Nếu khuôn mặt gần vuông/còn tròn, ta dùng tỷ lệ hàm/trán để phân biệt
+        if jaw_forehead_ratio < 1.1:
+            face_shape = "Khuôn mặt tròn"
+            face_type = "round"
+        else:
+            face_shape = "Khuôn mặt vuông"
+            face_type = "square"
+    else:
+        face_shape = "Khuôn mặt tam giác"
+        face_type = "triangle"
+
+    return face_shape, face_type, length_width_ratio, jaw_forehead_ratio
+
+def calculate_jewelry_size_and_position(face_x, face_y, face_width, face_height, face_type):
+    """
+    Tính toán kích thước và vị trí chèn hình ảnh trang sức dựa trên bounding box của khuôn mặt và loại khuôn mặt.
+    Trả về:
+      - earring_size: kích thước khuyên tai (width, height)
+      - earring_left_pos: vị trí chèn khuyên tai trái
+      - earring_right_pos: vị trí chèn khuyên tai phải
+      - necklace_size: kích thước vòng cổ (width, height)
+      - necklace_pos: vị trí chèn vòng cổ
+    """
+    # Giá trị mặc định
+    earring_size = (int(face_width * 0.2), int(face_height * 0.3))
+    necklace_size = (int(face_width * 1.2), int(face_height * 0.4))
+    earring_left_pos = (face_x - int(face_width * 0.15), face_y + int(face_height * 0.3))
+    earring_right_pos = (face_x + face_width - int(face_width * 0.05), face_y + int(face_height * 0.3))
+    necklace_pos = (face_x - int(face_width * 0.1), face_y + face_height - int(face_height * 0.2))
+
+    # Điều chỉnh cho từng loại khuôn mặt
+    if face_type == "long":
+        earring_size = (int(face_width * 0.15), int(face_height * 0.4))
+        necklace_size = (int(face_width * 1.1), int(face_height * 0.3))
+        necklace_pos = (face_x - int(face_width * 0.05), face_y + face_height - int(face_height * 0.15))
+    elif face_type == "oval":
+        earring_size = (int(face_width * 0.18), int(face_height * 0.28))
+        necklace_size = (int(face_width * 1.2), int(face_height * 0.35))
+        necklace_pos = (face_x - int(face_width * 0.08), face_y + face_height - int(face_height * 0.18))
+    elif face_type == "round":
+        earring_size = (int(face_width * 0.22), int(face_height * 0.32))
+        necklace_size = (int(face_width * 1.3), int(face_height * 0.38))
+        necklace_pos = (face_x - int(face_width * 0.12), face_y + face_height - int(face_height * 0.2))
+    elif face_type == "square":
+        earring_size = (int(face_width * 0.2), int(face_height * 0.3))
+        necklace_size = (int(face_width * 1.25), int(face_height * 0.36))
+        necklace_pos = (face_x - int(face_width * 0.1), face_y + face_height - int(face_height * 0.22))
+    elif face_type == "triangle":
+        earring_size = (int(face_width * 0.2), int(face_height * 0.35))
+        necklace_size = (int(face_width * 1.15), int(face_height * 0.33))
+        necklace_pos = (face_x - int(face_width * 0.09), face_y + face_height - int(face_height * 0.17))
+
+    return earring_size, earring_left_pos, earring_right_pos, necklace_size, necklace_pos
+
+def add_jewelry(frame_pil, face_x, face_y, face_width, face_height, face_type):
+    """
+    Chèn hình ảnh trang sức (khuyên tai và vòng cổ) lên ảnh dựa trên bounding box khuôn mặt và loại khuôn mặt.
+    Các file hình ảnh được chọn theo từ điển jewelry_images.
+    """
+    jewelry_images = {
+        "long": ("earring_long.png", "necklace_long.png"),
+        "oval": ("earring_oval.png", "necklace_oval.png"),
+        "round": ("earring_round.png", "necklace_round.png"),
+        "square": ("earring_square.png", "necklace_square.png"),
+        "triangle": ("earring_triangle.png", "necklace_triangle.png")
+    }
+
+    if face_type in jewelry_images:
+        earring_file, necklace_file = jewelry_images[face_type]
+        try:
+            earring_img = Image.open(earring_file).convert('RGBA')
+            necklace_img = Image.open(necklace_file).convert('RGBA')
+        except Exception as e:
+            print("Lỗi mở ảnh trang sức:", e)
+            return frame_pil
+
+        # Tính toán kích thước và vị trí dựa trên bounding box
+        earring_size, earring_left_pos, earring_right_pos, necklace_size, necklace_pos = calculate_jewelry_size_and_position(
+            face_x, face_y, face_width, face_height, face_type
+        )
+
+        # Resize các ảnh trang sức
+        earring_left = earring_img.resize(earring_size)
+        earring_right = earring_img.resize(earring_size)
+        necklace_resized = necklace_img.resize(necklace_size)
+
+        # Chèn khuyên tai và vòng cổ lên ảnh (sử dụng mask để giữ nền trong suốt)
+        frame_pil.paste(earring_left, earring_left_pos, earring_left)
+        frame_pil.paste(earring_right, earring_right_pos, earring_right)
+        frame_pil.paste(necklace_resized, necklace_pos, necklace_resized)
+
+    return frame_pil
+
+# ----------------- VÒNG LẶP CHÍNH -----------------
+
+def suggest_jewelry_mediapipe():
+    # Khởi tạo webcam và MediaPipe Face Mesh
+    cap = cv2.VideoCapture(0)
+    mp_face_mesh = mp.solutions.face_mesh
+    face_mesh = mp_face_mesh.FaceMesh(
+        max_num_faces=1,
+        refine_landmarks=True,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5
+    )
+
+    # Tải font hiển thị (đảm bảo arial.ttf có sẵn)
+    font_path = "arial.ttf"
+    try:
+        font = ImageFont.truetype(font_path, 20)
+    except Exception as e:
+        print("Không tìm thấy font:", e)
+        return
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Không thể nhận frame từ webcam.")
+            break
+
+        # Chuyển ảnh sang RGB để xử lý với MediaPipe
+        image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = face_mesh.process(image_rgb)
+
+        # Chuyển sang định dạng PIL để vẽ chữ và chèn ảnh trang sức
+        frame_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(frame_pil)
+
+        if results.multi_face_landmarks:
+            for face_landmarks in results.multi_face_landmarks:
+                h, w, _ = frame.shape
+                # Chuyển các landmark về tọa độ pixel
+                landmarks = []
+                for lm in face_landmarks.landmark:
+                    x, y = int(lm.x * w), int(lm.y * h)
+                    landmarks.append((x, y))
+
+                # Tính bounding box của khuôn mặt
+                xs = [pt[0] for pt in landmarks]
+                ys = [pt[1] for pt in landmarks]
+                face_x = min(xs)
+                face_y = min(ys)
+                face_width = max(xs) - face_x
+                face_height = max(ys) - face_y
+
+                # Phân loại hình dạng khuôn mặt dựa trên các điểm landmark
+                face_shape, face_type, lw_ratio, jf_ratio = classify_face_shape_from_landmarks(landmarks)
+                suggestion_text = f"{face_shape}\nL/W: {lw_ratio:.2f}\nJ/F: {jf_ratio:.2f}"
+                draw.text((face_x, face_y - 60), suggestion_text, font=font, fill=(255, 255, 255, 255))
+
+                # (Tùy chọn) Vẽ một số landmark để debug
+                # for pt in landmarks:
+                #     draw.ellipse((pt[0]-2, pt[1]-2, pt[0]+2, pt[1]+2), fill=(0,255,0))
+
+                # Chèn hình ảnh trang sức tương ứng
+                frame_pil = add_jewelry(frame_pil, face_x, face_y, face_width, face_height, face_type)
+
+        # Chuyển lại về OpenCV để hiển thị
+        frame = cv2.cvtColor(np.array(frame_pil), cv2.COLOR_RGB2BGR)
+        cv2.imshow("Đề xuất trang sức phù hợp", frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    suggest_jewelry_mediapipe()
