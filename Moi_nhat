@@ -1,0 +1,142 @@
+import cv2
+import mediapipe as mp
+from PIL import Image, ImageDraw, ImageFont
+import numpy as np
+import math
+
+def tinh_khoang_cach(p1, p2):
+    return math.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
+
+def phan_loai_khuon_mat(landmarks):
+    try:
+        diem_10 = landmarks[10]
+        diem_152 = landmarks[152]
+        diem_234 = landmarks[234]
+        diem_454 = landmarks[454]
+        diem_70 = landmarks[70]
+        diem_300 = landmarks[300]
+    except IndexError:
+        return "Khuôn mặt không xác định", "oval", 1.0, 1.0, "Không xác định", "Không xác định"
+
+    chieu_dai_khuon_mat = tinh_khoang_cach(diem_10, diem_152)
+    chieu_rong_khuon_mat = tinh_khoang_cach(diem_234, diem_454)
+    chieu_rong_tran = tinh_khoang_cach(diem_70, diem_300)
+    chieu_rong_ham = chieu_rong_khuon_mat
+
+    ty_le_dai_rong = chieu_dai_khuon_mat / chieu_rong_khuon_mat if chieu_rong_khuon_mat != 0 else 1.0
+    ty_le_ham_tran = chieu_rong_ham / chieu_rong_tran if chieu_rong_tran != 0 else 1.0
+
+    if ty_le_dai_rong > 1.5:
+        return "Khuôn mặt dài", "long", ty_le_dai_rong, ty_le_ham_tran, "Bạc hoặc vàng trắng", "Màu pastel nhẹ nhàng"
+    elif 1.2 <= ty_le_dai_rong <= 1.5:
+        return "Khuôn mặt trái xoan", "oval", ty_le_dai_rong, ty_le_ham_tran, "Vàng, kim cương hoặc ngọc trai", "Màu trung tính hoặc tông ấm"
+    elif abs(ty_le_dai_rong - 1.0) < 0.2:
+        if ty_le_ham_tran < 1.1:
+            return "Khuôn mặt tròn", "round", ty_le_dai_rong, ty_le_ham_tran, "Bạc, đá quý hình oval hoặc vuông", "Màu tối hoặc đậm"
+        else:
+            return "Khuôn mặt vuông", "square", ty_le_dai_rong, ty_le_ham_tran, "Ngọc trai, đá tròn hoặc hình giọt nước", "Màu sắc tươi sáng"
+    else:
+        return "Khuôn mặt tam giác", "triangle", ty_le_dai_rong, ty_le_ham_tran, "Vàng hồng, ngọc bích hoặc đá quý màu sắc nhẹ", "Màu nhạt hoặc pastel"
+
+def dieu_chinh_vi_tri_trang_suc(face_x, face_y, face_width, face_height, landmarks):
+    dai_tai_trai = landmarks[234]
+    dai_tai_phai = landmarks[454]
+    co = landmarks[152]
+
+    khoang_cach_khuyen_tai_y = int(face_height * 0.05)
+    kich_thuoc_khuyen_tai = (int(face_width * 0.15), int(face_height * 0.2))
+    vi_tri_khuyen_tai_trai = (dai_tai_trai[0] - int(kich_thuoc_khuyen_tai[0] / 2), dai_tai_trai[1] + khoang_cach_khuyen_tai_y)
+    vi_tri_khuyen_tai_phai = (dai_tai_phai[0] - int(kich_thuoc_khuyen_tai[0] / 2), dai_tai_phai[1] + khoang_cach_khuyen_tai_y)
+
+    khoang_cach_vong_co_y = int(face_height * 0.1)
+    kich_thuoc_vong_co = (int(face_width * 1.2), int(face_height * 0.4))
+    vi_tri_vong_co = (face_x - int(face_width * 0.1), co[1] + khoang_cach_vong_co_y)
+
+    return kich_thuoc_khuyen_tai, vi_tri_khuyen_tai_trai, vi_tri_khuyen_tai_phai, kich_thuoc_vong_co, vi_tri_vong_co
+
+def them_trang_suc(frame_pil, face_x, face_y, face_width, face_height, face_type, landmarks):
+    anh_trang_suc = {
+        "long": ("earring_long.png", "necklace_long.png"),
+        "oval": ("earring_oval.png", "necklace_oval.png"),
+        "round": ("earring_round.png", "necklace_round.png"),
+        "square": ("earring_square.png", "necklace_square.png"),
+        "triangle": ("earring_triangle.png", "necklace_triangle.png")
+    }
+
+    if face_type in anh_trang_suc:
+        file_khuyen_tai, file_vong_co = anh_trang_suc[face_type]
+        try:
+            anh_khuyen_tai = Image.open(file_khuyen_tai).convert('RGBA')
+            anh_vong_co = Image.open(file_vong_co).convert('RGBA')
+        except Exception as e:
+            print("Lỗi mở ảnh trang sức:", e)
+            return frame_pil
+
+        kich_thuoc_khuyen_tai, vi_tri_khuyen_tai_trai, vi_tri_khuyen_tai_phai, kich_thuoc_vong_co, vi_tri_vong_co = dieu_chinh_vi_tri_trang_suc(
+            face_x, face_y, face_width, face_height, landmarks
+        )
+
+        anh_khuyen_tai = anh_khuyen_tai.resize(kich_thuoc_khuyen_tai, Image.Resampling.LANCZOS)
+        anh_vong_co = anh_vong_co.resize(kich_thuoc_vong_co, Image.Resampling.LANCZOS)
+
+        frame_pil.paste(anh_khuyen_tai, vi_tri_khuyen_tai_trai, anh_khuyen_tai)
+        frame_pil.paste(anh_khuyen_tai, vi_tri_khuyen_tai_phai, anh_khuyen_tai)
+        frame_pil.paste(anh_vong_co, vi_tri_vong_co, anh_vong_co)
+
+    return frame_pil
+
+def de_xuat_trang_suc():
+    cap = cv2.VideoCapture(0)
+    mp_face_mesh = mp.solutions.face_mesh
+    face_mesh = mp_face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True, min_detection_confidence=0.5, min_tracking_confidence=0.5)
+    duong_dan_font = "arial.ttf"
+    try:
+        font = ImageFont.truetype(duong_dan_font, 20)  # Giảm kích thước font chữ
+    except Exception as e:
+        print("Không tìm thấy font:", e)
+        return
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Không thể nhận frame từ webcam.")
+            break
+
+        image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = face_mesh.process(image_rgb)
+        frame_pil = Image.fromarray(image_rgb)
+        draw = ImageDraw.Draw(frame_pil)
+
+        if results.multi_face_landmarks:
+            for face_landmarks in results.multi_face_landmarks:
+                h, w, _ = frame.shape
+                landmarks = [(int(lm.x * w), int(lm.y * h)) for lm in face_landmarks.landmark]
+
+                face_x = min(pt[0] for pt in landmarks)
+                face_y = min(pt[1] for pt in landmarks)
+                face_width = max(pt[0] for pt in landmarks) - face_x
+                face_height = max(pt[1] for pt in landmarks) - face_y
+
+                loai_khuon_mat, kieu_khuon_mat, ty_le_dai_rong, ty_le_ham_tran, chat_lieu, mau_sac = phan_loai_khuon_mat(landmarks)
+                thong_tin_de_xuat = (
+                    f"{loai_khuon_mat}\n"
+                    f"L/W: {ty_le_dai_rong:.2f}  J/F: {ty_le_ham_tran:.2f}\n"
+                    f"Chất liệu: {chat_lieu}\n"
+                    f"Màu sắc: {mau_sac}"
+                )
+                draw.text((10, 10), thong_tin_de_xuat, font=font, fill=(255, 0, 0, 255))
+
+                frame_pil = them_trang_suc(frame_pil, face_x, face_y, face_width, face_height, kieu_khuon_mat, landmarks)
+
+        frame = cv2.cvtColor(np.array(frame_pil), cv2.COLOR_RGB2BGR)
+        cv2.imshow("Đề xuất trang sức phù hợp", frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    de_xuat_trang_suc()
+    
